@@ -1,4 +1,4 @@
-# app.py (Versão Final de Produção)
+# app.py (Versão Final de Produção com Debug)
 import streamlit as st
 import os
 import google.generativeai as genai
@@ -29,13 +29,11 @@ genai.configure(api_key=api_key)
 def carregar_base_conhecimento():
     """
     Carrega o índice FAISS pré-construído do repositório.
-    Esta é a abordagem mais rápida e fiável para produção.
     """
     CAMINHO_INDEX_FAISS = "faiss_index_agrofel"
 
     if not os.path.exists(CAMINHO_INDEX_FAISS):
         st.error(f"ERRO CRÍTICO: A base de conhecimento pré-construída ('{CAMINHO_INDEX_FAISS}') não foi encontrada no repositório.")
-        st.error("Por favor, certifique-se de que a pasta foi enviada para o GitHub e que o .gitignore foi atualizado.")
         return None, None
 
     try:
@@ -65,6 +63,15 @@ def agente_especialista_recomenda(query: str, db, llm):
 # --- O RESTANTE DO CÓDIGO DA INTERFACE PERMANECE O MESMO ---
 
 st.title("🌿 Assistente de Campo Agrofel")
+
+# --- PAINEL DE DEBUG NA BARRA LATERAL ---
+with st.sidebar:
+    st.header("Opções de Desenvolvedor")
+    if st.button("🚨 Limpar Cache da Aplicação"):
+        st.cache_resource.clear()
+        st.success("Cache limpo! A aplicação irá recarregar a base de dados.")
+        st.rerun()
+
 st.markdown("Bem-vindo! Descreva seu problema com pragas na lavoura e encontrarei a melhor solução para você.")
 
 db, llm = carregar_base_conhecimento()
