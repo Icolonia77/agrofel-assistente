@@ -1,0 +1,17 @@
+# Arquivo .gitignore
+
+# Ignorar o ambiente virtual
+.venv/
+venv/
+__pycache__/
+
+# Ignorar o arquivo de variáveis de ambiente (MUITO IMPORTANTE)
+.env
+
+# Ignorar o índice FAISS local. 
+# Vamos deixar o Streamlit Cloud criar o seu próprio.
+faiss_index_agrofel/
+
+# Arquivos de sistema do Windows e macOS
+Thumbs.db
+.DS_Store
