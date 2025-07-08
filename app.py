@@ -16,10 +16,11 @@ st.set_page_config(page_title="Assistente Agrofel", page_icon="🌿", layout="wi
 # Carrega as variáveis de ambiente do arquivo .env (para execução local)
 load_dotenv()
 
-# Lógica para carregar a chave de API de forma segura
+# Lógica para carregar a chave de API de forma segura, tanto localmente quanto na nuvem
 api_key = os.getenv("GOOGLE_API_KEY")
 if not api_key:
     try:
+        # Tenta obter a chave dos segredos do Streamlit se o .env não funcionar (para deploy)
         api_key = st.secrets["GOOGLE_API_KEY"]
     except (FileNotFoundError, KeyError):
         st.error("Chave de API do Google não encontrada! Configure-a no arquivo .env ou nos segredos do Streamlit.")
@@ -32,7 +33,7 @@ genai.configure(api_key=api_key)
 @st.cache_resource
 def carregar_base_conhecimento():
     """
-    Carrega ou cria o índice FAISS. Agora inclui tratamento de erro para arquivos individuais.
+    Carrega ou cria o índice FAISS. Agora inclui tratamento de erro para ficheiros individuais.
     """
     CAMINHO_INDEX_FAISS = "faiss_index_agrofel"
     PASTA_BULAS = "documentos/"
@@ -63,16 +64,16 @@ def carregar_base_conhecimento():
                     pagina.metadata['source'] = nome_arquivo
                 todos_documentos.extend(paginas)
             except Exception as e:
-                # Se um arquivo falhar, ele será adicionado à lista de falhas
+                # Se um ficheiro falhar, ele será adicionado à lista de falhas
                 arquivos_falharam.append(f"{nome_arquivo} (Erro: {e})")
             
             progress_bar.progress((i + 1) / len(lista_arquivos), text=f"Processando {nome_arquivo}")
         
         progress_bar.empty()
 
-        # Exibe um aviso se algum arquivo falhou na leitura
+        # Exibe um aviso se algum ficheiro falhou na leitura
         if arquivos_falharam:
-            st.error(f"Atenção: Os seguintes arquivos não puderam ser processados e foram ignorados:")
+            st.error(f"Atenção: Os seguintes ficheiros não puderam ser processados e foram ignorados:")
             for arquivo in arquivos_falharam:
                 st.write(f"- `{arquivo}`")
 
@@ -189,3 +190,4 @@ if st.session_state.recomendacao:
                 encaminhar_para_humano(st.session_state.pergunta)
                 st.info("Sua solicitação foi registrada. Um especialista entrará em contato.")
                 st.session_state.recomendacao = ""
+
