@@ -1,4 +1,4 @@
-# app.py (Versão Definitiva - Lógica de Busca Corrigida + Notificações)
+# app.py (Versão Final com Prompt Ajustado e Notificações)
 import streamlit as st
 import os
 import smtplib
@@ -52,12 +52,10 @@ def carregar_base_conhecimento():
 def agente_especialista_recomenda(query: str, db, llm):
     """
     Implementa a lógica RAG com Transformação de Consulta para maior robustez.
-    Esta é a versão CORRIGIDA que funciona.
     """
     if db is None or llm is None:
         return "Erro: A base de conhecimento não está carregada."
 
-    # ETAPA 1: TRANSFORMAÇÃO DA CONSULTA
     template_transformacao = """Você é um especialista em agronomia. Sua tarefa é transformar a pergunta de um utilizador numa lista de 3 consultas de busca otimizadas para uma base de dados vetorial.
     As consultas devem ser concisas e variadas para cobrir diferentes aspetos da pergunta.
     Responda apenas com as consultas, uma por linha.
@@ -71,7 +69,6 @@ def agente_especialista_recomenda(query: str, db, llm):
     cadeia_transformacao = prompt_transformacao | llm | StrOutputParser()
     consultas_geradas = cadeia_transformacao.invoke({"pergunta": query}).strip().split('\n')
 
-    # ETAPA 2: BUSCA AUMENTADA
     todos_chunks = []
     for consulta in consultas_geradas:
         todos_chunks.extend(db.similarity_search(consulta, k=3))
@@ -83,7 +80,7 @@ def agente_especialista_recomenda(query: str, db, llm):
 
     contexto_final = "\n\n---\n\n".join([doc.page_content for doc in unique_chunks])
 
-    # ETAPA 3: GERAÇÃO DA RESPOSTA FINAL
+    # --- PROMPT FINAL AJUSTADO ---
     prompt_geracao_final = f"""Você é um consultor especialista da Agrofel. Com base nos TRECHOS RELEVANTES DAS BULAS, gere uma recomendação clara e objetiva.
 
     PERGUNTA ORIGINAL DO AGRICULTOR: "{query}"
@@ -93,15 +90,16 @@ def agente_especialista_recomenda(query: str, db, llm):
     {contexto_final}
     ---
     INSTRUÇÕES:
-    1. Sugira até DOIS produtos que melhor respondam à pergunta. Se encontrar apenas um, sugira apenas um.
-    2. Extraia o nome exato do produto e crie uma descrição curta e convincente.
-    3. Formato:
+    1. Esforce-se para sugerir DOIS produtos distintos que respondam à pergunta.
+    2. Se, após uma análise cuidadosa, for absolutamente impossível encontrar um segundo produto relevante, então sugira apenas um.
+    3. Para cada produto, extraia o nome exato e crie uma descrição curta e convincente.
+    4. Formato:
        **Produto 1:** [Nome do Produto]
        **Descrição:** [Sua descrição]
 
        **Produto 2:** [Nome do Produto]
        **Descrição:** [Sua descrição]
-    4. Se os trechos não forem suficientes, responda APENAS com: "NAO_ENCONTRADO".
+    5. Se os trechos não forem suficientes para nenhuma recomendação segura, responda APENAS com: "NAO_ENCONTRADO".
     """
     resposta_final = llm.invoke(prompt_geracao_final)
     return resposta_final.content
@@ -199,6 +197,7 @@ if st.session_state.recomendacao:
         with col2:
             link_whatsapp_com_produto = gerar_link_whatsapp(st.session_state.pergunta, st.session_state.recomendacao)
             st.link_button("🗣️ Falar com um Humano via WhatsApp", link_whatsapp_com_produto, use_container_width=True)
+
 
 
 
