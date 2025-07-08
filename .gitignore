@@ -10,7 +10,7 @@ __pycache__/
 
 # Ignorar o índice FAISS local. 
 # Vamos deixar o Streamlit Cloud criar o seu próprio.
-faiss_index_agrofel/
+
 
 # Arquivos de sistema do Windows e macOS
 Thumbs.db

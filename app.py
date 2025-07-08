@@ -1,4 +1,4 @@
-# app.py (Versão de Diagnóstico)
+# app.py (Versão Final de Produção)
 import streamlit as st
 import os
 import google.generativeai as genai
@@ -7,11 +7,9 @@ from dotenv import load_dotenv
 # Imports para LangChain
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_community.vectorstores import FAISS
-from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 # --- CONFIGURAÇÃO INICIAL DA PÁGINA E VARIÁVEIS DE AMBIENTE ---
-st.set_page_config(page_title="Assistente Agrofel (Debug)", page_icon="🐞", layout="wide")
+st.set_page_config(page_title="Assistente Agrofel", page_icon="🌿", layout="wide")
 
 # Lógica para carregar a chave de API de forma segura
 load_dotenv()
@@ -27,59 +25,32 @@ genai.configure(api_key=api_key)
 
 # --- FUNÇÕES DE LÓGICA (BACKEND DA APLICAÇÃO) ---
 
-@st.cache_resource(show_spinner="A carregar/criar a base de conhecimento...")
+@st.cache_resource(show_spinner="A carregar base de conhecimento...")
 def carregar_base_conhecimento():
     """
-    Carrega ou cria o índice FAISS. Retorna o DB, o LLM e metadados de diagnóstico.
+    Carrega o índice FAISS pré-construído do repositório.
+    Esta é a abordagem mais rápida e fiável para produção.
     """
     CAMINHO_INDEX_FAISS = "faiss_index_agrofel"
-    PASTA_BULAS = "documentos/"
-    
-    diagnostico = {
-        "arquivos_encontrados": [],
-        "arquivos_falharam": [],
-        "total_chunks": 0
-    }
 
-    if not os.path.exists(PASTA_BULAS) or not os.listdir(PASTA_BULAS):
-        st.error(f"ERRO CRÍTICO: A pasta '{PASTA_BULAS}' não foi encontrada ou está vazia no repositório.")
-        return None, None, diagnostico
-    
-    diagnostico["arquivos_encontrados"] = sorted([f for f in os.listdir(PASTA_BULAS) if f.lower().endswith('.pdf')])
+    if not os.path.exists(CAMINHO_INDEX_FAISS):
+        st.error(f"ERRO CRÍTICO: A base de conhecimento pré-construída ('{CAMINHO_INDEX_FAISS}') não foi encontrada no repositório.")
+        st.error("Por favor, certifique-se de que a pasta foi enviada para o GitHub e que o .gitignore foi atualizado.")
+        return None, None
 
-    if os.path.exists(CAMINHO_INDEX_FAISS):
+    try:
         embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
         db = FAISS.load_local(CAMINHO_INDEX_FAISS, embeddings, allow_dangerous_deserialization=True)
-    else:
-        todos_documentos = []
-        for nome_arquivo in diagnostico["arquivos_encontrados"]:
-            try:
-                caminho_completo = os.path.join(PASTA_BULAS, nome_arquivo)
-                loader = PyPDFLoader(caminho_completo)
-                paginas = loader.load()
-                for pagina in paginas:
-                    pagina.metadata['source'] = nome_arquivo
-                todos_documentos.extend(paginas)
-            except Exception as e:
-                diagnostico["arquivos_falharam"].append(f"{nome_arquivo} (Erro: {e})")
-
-        if not todos_documentos:
-            st.error("Nenhum documento pôde ser processado. A base de dados não pode ser criada.")
-            return None, None, diagnostico
-
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=200)
-        chunks = text_splitter.split_documents(todos_documentos)
-        diagnostico["total_chunks"] = len(chunks)
-        
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-        db = FAISS.from_documents(chunks, embeddings)
-        db.save_local(CAMINHO_INDEX_FAISS)
-
-    llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", temperature=0.4)
-    return db, llm, diagnostico
+        llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", temperature=0.4)
+        return db, llm
+    except Exception as e:
+        st.error(f"Ocorreu um erro ao carregar a base de conhecimento: {e}")
+        return None, None
 
 def agente_especialista_recomenda(query: str, db, llm):
-    # Esta função permanece a mesma da versão anterior
+    """
+    Usa a lógica RAG de múltiplas etapas para encontrar e recomendar produtos.
+    """
     if db is None or llm is None: return "Erro: A base de conhecimento não está carregada."
     docs_relevantes = db.similarity_search(query, k=10)
     if not docs_relevantes: return "NAO_ENCONTRADO"
@@ -91,43 +62,13 @@ def agente_especialista_recomenda(query: str, db, llm):
     resposta_final = llm.invoke(prompt_geracao_final)
     return resposta_final.content
 
-# --- INTERFACE DO USUÁRIO (STREAMLIT) ---
+# --- O RESTANTE DO CÓDIGO DA INTERFACE PERMANECE O MESMO ---
 
 st.title("🌿 Assistente de Campo Agrofel")
 st.markdown("Bem-vindo! Descreva seu problema com pragas na lavoura e encontrarei a melhor solução para você.")
 
-db, llm, info_diagnostico = carregar_base_conhecimento()
+db, llm = carregar_base_conhecimento()
 
-# --- PAINEL DE DIAGNÓSTICO ---
-with st.expander("🐞 Informações de Diagnóstico (Ambiente de Produção)"):
-    st.write("**Ficheiros PDF Encontrados no Repositório:**", len(info_diagnostico["arquivos_encontrados"]))
-    st.json(info_diagnostico["arquivos_encontrados"])
-    
-    if info_diagnostico["arquivos_falharam"]:
-        st.error("**Ficheiros que Falharam ao Processar:**", len(info_diagnostico["arquivos_falharam"]))
-        st.json(info_diagnostico["arquivos_falharam"])
-    else:
-        st.success("Todos os ficheiros foram processados com sucesso.")
-
-    if info_diagnostico["total_chunks"] > 0:
-        st.write("**Total de Chunks de Texto Criados:**", info_diagnostico["total_chunks"])
-
-    st.info("Use o botão abaixo para testar a busca pela consulta específica que está a falhar.")
-    if st.button("Executar Teste de Diagnóstico para 'Capim Amargoso na Soja'"):
-        with st.spinner("A executar teste..."):
-            query_teste = "Qual produto usar para Capim-amargoso na cultura da soja?"
-            docs_teste = db.similarity_search_with_score(query_teste, k=5)
-            st.subheader("Resultado da Busca por Similaridade (Etapa 1)")
-            if not docs_teste:
-                st.error("A busca não retornou NENHUM resultado.")
-            else:
-                for i, (doc, score) in enumerate(docs_teste):
-                    st.write(f"**Chunk {i+1} (Score: {score:.4f})**")
-                    st.write(f"Fonte: `{doc.metadata.get('source', 'N/D')}`")
-                    st.code(doc.page_content, language="text")
-
-# --- Lógica Principal da Aplicação ---
-# (O restante do código permanece o mesmo)
 if 'recomendacao' not in st.session_state: st.session_state.recomendacao = ""
 if 'pergunta' not in st.session_state: st.session_state.pergunta = ""
 
@@ -145,9 +86,24 @@ if submitted and pergunta_usuario:
         st.error("A base de conhecimento não pôde ser carregada.")
 
 if st.session_state.recomendacao:
-    # (A lógica de exibição da resposta permanece a mesma)
     if "NAO_ENCONTRADO" in st.session_state.recomendacao:
         st.warning("Não encontrei produtos específicos para sua solicitação em nossa base de dados.")
+        st.info("Gostaria de falar com um de nossos consultores para obter ajuda personalizada?")
+        if st.button("Sim, solicitar contato de um especialista"):
+            st.success("Sua solicitação foi enviada! Um consultor Agrofel entrará em contato em breve.")
+            st.session_state.recomendacao = ""
     else:
         st.subheader("Encontrei estas sugestões para você:")
         st.markdown(st.session_state.recomendacao)
+        st.markdown("---")
+        st.markdown("O que você gostaria de fazer?")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("✅ Confirmar Pedido", type="primary", use_container_width=True):
+                st.success("Pedido confirmado! Seu consultor Agrofel foi notificado.")
+                st.balloons()
+                st.session_state.recomendacao = ""
+        with col2:
+            if st.button("🗣️ Falar com um Humano", use_container_width=True):
+                st.info("Sua solicitação foi registrada. Um especialista entrará em contato.")
+                st.session_state.recomendacao = ""
