@@ -1,4 +1,4 @@
-# app.py (Versão Final de Produção com Notificações)
+# app.py (Versão Definitiva - Lógica de Busca Corrigida + Notificações)
 import streamlit as st
 import os
 import smtplib
@@ -52,10 +52,12 @@ def carregar_base_conhecimento():
 def agente_especialista_recomenda(query: str, db, llm):
     """
     Implementa a lógica RAG com Transformação de Consulta para maior robustez.
+    Esta é a versão CORRIGIDA que funciona.
     """
     if db is None or llm is None:
         return "Erro: A base de conhecimento não está carregada."
 
+    # ETAPA 1: TRANSFORMAÇÃO DA CONSULTA
     template_transformacao = """Você é um especialista em agronomia. Sua tarefa é transformar a pergunta de um utilizador numa lista de 3 consultas de busca otimizadas para uma base de dados vetorial.
     As consultas devem ser concisas e variadas para cobrir diferentes aspetos da pergunta.
     Responda apenas com as consultas, uma por linha.
@@ -69,6 +71,7 @@ def agente_especialista_recomenda(query: str, db, llm):
     cadeia_transformacao = prompt_transformacao | llm | StrOutputParser()
     consultas_geradas = cadeia_transformacao.invoke({"pergunta": query}).strip().split('\n')
 
+    # ETAPA 2: BUSCA AUMENTADA
     todos_chunks = []
     for consulta in consultas_geradas:
         todos_chunks.extend(db.similarity_search(consulta, k=3))
@@ -80,6 +83,7 @@ def agente_especialista_recomenda(query: str, db, llm):
 
     contexto_final = "\n\n---\n\n".join([doc.page_content for doc in unique_chunks])
 
+    # ETAPA 3: GERAÇÃO DA RESPOSTA FINAL
     prompt_geracao_final = f"""Você é um consultor especialista da Agrofel. Com base nos TRECHOS RELEVANTES DAS BULAS, gere uma recomendação clara e objetiva.
 
     PERGUNTA ORIGINAL DO AGRICULTOR: "{query}"
@@ -105,10 +109,8 @@ def agente_especialista_recomenda(query: str, db, llm):
 def enviar_email_confirmacao(pergunta, recomendacao):
     """
     Envia um email de notificação para o vendedor.
-    Requer configuração de segredos no Streamlit.
     """
     try:
-        # Carrega as credenciais dos segredos do Streamlit
         email_vendedor = st.secrets["EMAIL_VENDEDOR"]
         email_remetente = st.secrets["EMAIL_REMETENTE"]
         senha_remetente = st.secrets["SENHA_REMETENTE"]
@@ -116,35 +118,27 @@ def enviar_email_confirmacao(pergunta, recomendacao):
         st.error("As credenciais de email não estão configuradas nos segredos do Streamlit. O email não pode ser enviado.")
         return
 
-    # Formata o corpo do email em HTML
     corpo_email = f"""
-    <html>
-    <body>
+    <html><body>
         <p>Olá,</p>
-        <p>Um cliente solicitou um pedido através do <b>Assistente de Campo Agrofel</b>.</p>
-        <hr>
+        <p>Um cliente solicitou um pedido através do <b>Assistente de Campo Agrofel</b>.</p><hr>
         <h3>Detalhes da Solicitação:</h3>
         <p><b>Pergunta do Cliente:</b><br>{pergunta}</p>
         <p><b>Produtos Sugeridos e Confirmados:</b></p>
         <div style="background-color:#f0f0f0; border-left: 5px solid #4CAF50; padding: 10px;">
             {recomendacao.replace('**', '<b>').replace('**', '</b>').replace(chr(10), '<br>')}
-        </div>
-        <br>
+        </div><br>
         <p>Por favor, entre em contato com o cliente para dar seguimento.</p>
         <p>Atenciosamente,<br>Assistente de Campo Agrofel</p>
-    </body>
-    </html>
+    </body></html>
     """
 
-    # Cria o objeto do email
     msg = EmailMessage()
     msg['Subject'] = "Novo Pedido de Cliente - Assistente de Campo Agrofel"
     msg['From'] = email_remetente
     msg['To'] = email_vendedor
-    msg.set_content("Este é um email em HTML. Por favor, ative a visualização de HTML.")
     msg.add_alternative(corpo_email, subtype='html')
 
-    # Envia o email usando o servidor SMTP do Gmail
     try:
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
             smtp.login(email_remetente, senha_remetente)
@@ -158,18 +152,9 @@ def gerar_link_whatsapp(pergunta, recomendacao):
     """
     Gera um link "click to chat" do WhatsApp com uma mensagem pré-formatada.
     """
-    numero_whatsapp = "5519989963385" # Formato internacional sem '+' ou espaços
-    texto_base = f"""Olá!
-Usei o Assistente de Campo Agrofel e gostaria de falar com um especialista.
-
-Minha pergunta foi: "{pergunta}"
-
-A recomendação foi:
-{recomendacao.replace('**', '')}
-
-Aguardo contato.
-"""
-    texto_formatado = quote(texto_base) # Codifica o texto para a URL
+    numero_whatsapp = "5519989963385"
+    texto_base = f"""Olá! Usei o Assistente de Campo Agrofel e gostaria de falar com um especialista.\n\nMinha pergunta foi: "{pergunta}"\n\nA recomendação foi:\n{recomendacao.replace('**', '')}\n\nAguardo contato."""
+    texto_formatado = quote(texto_base)
     return f"https://wa.me/{numero_whatsapp}?text={texto_formatado}"
 
 
@@ -199,24 +184,21 @@ if st.session_state.recomendacao:
     if "NAO_ENCONTRADO" in st.session_state.recomendacao:
         st.warning("Não encontrei produtos específicos para sua solicitação em nossa base de dados.")
         st.info("Gostaria de falar com um de nossos consultores para obter ajuda personalizada?")
-        
-        # Gera o link do WhatsApp para o caso de não encontrar produtos
         link_whatsapp_sem_produto = gerar_link_whatsapp(st.session_state.pergunta, "Nenhuma recomendação automática foi gerada.")
         st.link_button("🗣️ Falar com um Humano via WhatsApp", link_whatsapp_sem_produto, use_container_width=True)
     else:
         st.subheader("Encontrei estas sugestões para você:")
         st.markdown(st.session_state.recomendacao)
-        
         st.markdown("---")
         st.markdown("O que você gostaria de fazer?")
         col1, col2 = st.columns(2)
         with col1:
             if st.button("✅ Confirmar Pedido", type="primary", use_container_width=True):
                 enviar_email_confirmacao(st.session_state.pergunta, st.session_state.recomendacao)
-                st.session_state.recomendacao = "" # Limpa o estado após a ação
+                st.session_state.recomendacao = ""
         with col2:
-            # Gera o link do WhatsApp com a recomendação incluída
             link_whatsapp_com_produto = gerar_link_whatsapp(st.session_state.pergunta, st.session_state.recomendacao)
             st.link_button("🗣️ Falar com um Humano via WhatsApp", link_whatsapp_com_produto, use_container_width=True)
+
 
 
