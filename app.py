@@ -1,6 +1,7 @@
-# app.py (Versão Ajustada - Resolve Perguntas Vagas)
+# app.py (Versão com Perguntas de Aprofundamento)
 import streamlit as st
 import os
+import re
 import smtplib
 from email.message import EmailMessage
 from urllib.parse import quote
@@ -30,7 +31,7 @@ if not api_key:
 genai.configure(api_key=api_key)
 
 
-# --- DEFINIÇÃO DA FERRAMENTA PARA ANÁLISE SEMÂNTICA (REVISTA) ---
+# --- DEFINIÇÃO DA FERRAMENTA PARA ANÁLISE SEMÂNTICA ---
 class AnalisePergunta(BaseModel):
     """Schema para analisar a pergunta de um agricultor."""
     cultura: str | None = Field(description="A cultura agrícola mencionada, como 'soja' ou 'milho'. Inclui sinônimos como 'plantação', 'lavoura'. Null se não mencionada.")
@@ -108,6 +109,47 @@ INSTRUÇÕES:
     resposta_final = llm.invoke(prompt_geracao_final)
     return resposta_final.content
 
+def buscar_resposta_especifica(produto: str, pergunta: str, db, llm):
+    """
+    Busca informações específicas sobre um produto usando RAG aprimorado.
+    """
+    # Consulta combinando produto e pergunta
+    query = f"{produto} {pergunta}"
+    
+    # Busca por similaridade com foco no produto
+    docs = db.similarity_search(query, k=5, filter={"source": produto})
+    if not docs:
+        # Fallback: busca geral se não encontrar com filtro
+        docs = db.similarity_search(query, k=5)
+    
+    contexto = "\n\n---\n\n".join([doc.page_content for doc in docs])
+    
+    # Prompt especializado para perguntas técnicas
+    prompt = f"""
+Você é um assistente técnico da Agrofel. Responda à pergunta do usuário baseando-se APENAS nas informações extraídas das bulas de produtos.
+
+PRODUTO EM FOCO: {produto}
+PERGUNTA: {pergunta}
+
+INFORMAÇÕES EXTRAÍDAS:
+---
+{contexto}
+---
+
+INSTRUÇÕES:
+1. Seja técnico e preciso
+2. Se a pergunta for sobre dosagem:
+   - Forneça a fórmula de cálculo
+   - Dê exemplo para área específica
+3. Se não encontrar informação exata:
+   - Indique "Informação não disponível"
+   - Sugira consultar engenheiro agrônomo
+4. Formate a resposta de forma clara e organizada
+5. NUNCA invente valores ou especificações técnicas
+"""
+    resposta = llm.invoke(prompt)
+    return resposta.content
+
 def obter_resposta_assistente(query: str, db, llm):
     """
     Orquestra o fluxo de trabalho com Roteador Melhorado
@@ -128,7 +170,7 @@ def obter_resposta_assistente(query: str, db, llm):
     praga = dados_analise.get("praga")
     termo_produto = dados_analise.get("termo_produto", False)
 
-    # ETAPA 2: Roteamento Inteligente (REVISTO)
+    # ETAPA 2: Roteamento Inteligente
     aviso = None
     
     # Caso 1: Pergunta muito vazia
@@ -172,15 +214,34 @@ def gerar_link_whatsapp(pergunta, recomendacao):
     texto_formatado = quote(texto_base)
     return f"https://wa.me/{numero_whatsapp}?text={texto_formatado}"
 
+# --- FUNÇÕES AUXILIARES PARA A INTERFACE ---
+def extrair_nomes_produtos(recomendacao: str):
+    """ Extrai os nomes dos produtos de uma string de recomendação. """
+    padrao = r"\*\*Produto \d+:\*\* (.*?)\n"
+    produtos = re.findall(padrao, recomendacao)
+    return produtos
+
 # --- INTERFACE DO USUÁRIO ---
 st.title("🌿 Assistente de Campo Agrofel")
 st.markdown("Bem-vindo! Descreva seu problema com pragas na lavoura e encontrarei a melhor solução para você.")
 
 db, llm = carregar_base_conhecimento()
 
-if 'recomendacao' not in st.session_state: st.session_state.recomendacao = ""
-if 'pergunta' not in st.session_state: st.session_state.pergunta = ""
+# Inicialização de estados da sessão
+if 'recomendacao' not in st.session_state:
+    st.session_state.recomendacao = ""
+if 'pergunta' not in st.session_state:
+    st.session_state.pergunta = ""
+if 'produtos' not in st.session_state:
+    st.session_state.produtos = []
+if 'resposta_especifica' not in st.session_state:
+    st.session_state.resposta_especifica = ""
+if 'produto_selecionado' not in st.session_state:
+    st.session_state.produto_selecionado = None
+if 'pergunta_especifica' not in st.session_state:
+    st.session_state.pergunta_especifica = ""
 
+# Formulário principal
 with st.form("pergunta_form"):
     pergunta_usuario = st.text_area("Qual praga está afetando sua lavoura e em qual cultura?", height=100, placeholder="Ex: Guanxuma na soja ou 'Produto para lagarta'")
     submitted = st.form_submit_button("Buscar Sugestões")
@@ -191,9 +252,12 @@ if submitted and pergunta_usuario:
             st.session_state.pergunta = pergunta_usuario
             recomendacao_gerada = obter_resposta_assistente(pergunta_usuario, db, llm)
             st.session_state.recomendacao = recomendacao_gerada
+            # Extrai os nomes dos produtos para perguntas posteriores
+            st.session_state.produtos = extrair_nomes_produtos(recomendacao_gerada) if "NAO_ENCONTRADO" not in recomendacao_gerada else []
     else:
         st.error("A base de conhecimento não pôde ser carregada.")
 
+# Exibição da recomendação principal
 if st.session_state.recomendacao:
     if "NAO_ENCONTRADO" in st.session_state.recomendacao:
         st.warning("Não encontrei produtos específicos para sua solicitação em nossa base de dados.")
@@ -217,3 +281,66 @@ if st.session_state.recomendacao:
         with col2:
             link_whatsapp_com_produto = gerar_link_whatsapp(st.session_state.pergunta, st.session_state.recomendacao)
             st.link_button("🗣️ Falar com um Humano via WhatsApp", link_whatsapp_com_produto, use_container_width=True)
+
+        # Seção para perguntas específicas sobre os produtos recomendados
+        st.markdown("---")
+        st.subheader("Dúvidas técnicas sobre os produtos?")
+        st.markdown("Selecione um produto e faça sua pergunta para obter informações detalhadas.")
+        
+        # Seletor de produtos
+        produto_selecionado = st.selectbox(
+            "Selecione um produto:",
+            st.session_state.produtos,
+            index=0,
+            key="produto_selector"
+        )
+        
+        # Perguntas frequentes pré-definidas
+        perguntas_frequentes = [
+            "Como faço pra aplicar esse produto?",
+            "Qual quantidade precisa pra 1 hectare?",
+            "Esse produto afeta a lavoura?",
+            "Quanto tempo após a aplicação posso fazer a colheita?",
+            "Qual o modo de ação do produto?",
+            "Outra pergunta..."
+        ]
+        
+        pergunta_rapida = st.selectbox(
+            "Perguntas frequentes:",
+            perguntas_frequentes,
+            index=0,
+            key="pergunta_rapida"
+        )
+        
+        # Campo para perguntas personalizadas
+        if pergunta_rapida == "Outra pergunta...":
+            pergunta_personalizada = st.text_input("Faça sua pergunta personalizada:", placeholder="Ex: Posso misturar com outros produtos?")
+        else:
+            pergunta_personalizada = pergunta_rapida
+        
+        # Botão para enviar pergunta específica
+        if st.button("Obter Resposta Técnica", type="secondary"):
+            if produto_selecionado and pergunta_personalizada:
+                with st.spinner("Buscando informações técnicas..."):
+                    st.session_state.produto_selecionado = produto_selecionado
+                    st.session_state.pergunta_especifica = pergunta_personalizada
+                    st.session_state.resposta_especifica = buscar_resposta_especifica(
+                        produto_selecionado, 
+                        pergunta_personalizada, 
+                        db, 
+                        llm
+                    )
+            else:
+                st.warning("Selecione um produto e faça uma pergunta")
+
+        # Exibir resposta da pergunta específica
+        if st.session_state.resposta_especifica:
+            st.markdown("---")
+            st.subheader(f"Resposta sobre {st.session_state.produto_selecionado}:")
+            st.info(st.session_state.resposta_especifica)
+            
+            # Botão para nova pergunta sobre o mesmo produto
+            if st.button("Fazer outra pergunta sobre este produto", type="primary"):
+                st.session_state.resposta_especifica = ""
+                st.session_state.pergunta_especifica = ""
+                st.experimental_rerun()
