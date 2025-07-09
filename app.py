@@ -1,4 +1,4 @@
-# app.py (Versão Ajustada com fallback aprimorado)
+# app.py (Versão Ajustada - Resolve Perguntas Vagas)
 import streamlit as st
 import os
 import smtplib
@@ -29,14 +29,17 @@ if not api_key:
         st.stop()
 genai.configure(api_key=api_key)
 
-# --- DEFINIÇÃO DA FERRAMENTA PARA ANÁLISE SEMÂNTICA ---
+
+# --- DEFINIÇÃO DA FERRAMENTA PARA ANÁLISE SEMÂNTICA (REVISTA) ---
 class AnalisePergunta(BaseModel):
     """Schema para analisar a pergunta de um agricultor."""
-    cultura: str | None = Field(description="A cultura agrícola mencionada, como 'soja' ou 'milho'. Null se não mencionada.")
-    praga: str | None = Field(description="A praga mencionada, como 'lagarta', 'guanxuma' ou 'ferrugem'. Null se não mencionada.")
-    is_praga_generica: bool = Field(description="True se a praga for uma palavra geral como 'praga', 'doença', 'problema'. False caso contrário.")
+    cultura: str | None = Field(description="A cultura agrícola mencionada, como 'soja' ou 'milho'. Inclui sinônimos como 'plantação', 'lavoura'. Null se não mencionada.")
+    praga: str | None = Field(description="A praga mencionada, como 'lagarta', 'guanxuma' ou 'ferrugem'. Inclui termos relacionados como 'doença', 'inseto', 'patógeno'. Null se não mencionada.")
+    termo_produto: bool = Field(description="True se a pergunta mencionar termos como 'produto', 'veneno', 'tratamento' ou 'solução'.")
+
 
 # --- FUNÇÕES DE LÓGICA (BACKEND DA APLICAÇÃO) ---
+
 @st.cache_resource(show_spinner="A carregar base de conhecimento...")
 def carregar_base_conhecimento():
     """ Carrega o índice FAISS pré-construído do repositório. """
@@ -53,110 +56,107 @@ def carregar_base_conhecimento():
         st.error(f"Ocorreu um erro ao carregar a base de conhecimento: {e}")
         return None, None
 
-
 def _buscar_e_gerar_recomendacao(query: str, db, llm, aviso_contexto: str | None = None):
     """ Executa o fluxo de RAG com Transformação de Consulta. """
-    template_transformacao = (
-        "Você é um especialista em agronomia. Transforme a pergunta do utilizador em 3 consultas de busca concisas e variadas para uma base de dados vetorial. "
-        "Responda apenas com as consultas, uma por linha.\n\nPergunta Original: {pergunta}\n\nConsultas de Busca:"
-    )
+    template_transformacao = "Você é um especialista em agronomia. Transforme a pergunta do utilizador em 3 consultas de busca concisas e variadas para uma base de dados vetorial. Responda apenas com as consultas, uma por linha.\n\nPergunta Original: {pergunta}\n\nConsultas de Busca:"
     prompt_transformacao = ChatPromptTemplate.from_template(template_transformacao)
     cadeia_transformacao = prompt_transformacao | llm | StrOutputParser()
     consultas_geradas = cadeia_transformacao.invoke({"pergunta": query}).strip().split('\n')
     
     todos_chunks = []
     for consulta in consultas_geradas:
-        todos_chunks.extend(db.similarity_search(consulta, k=4))  # Aumentamos para k=4 para mais contexto
+        todos_chunks.extend(db.similarity_search(consulta, k=4))
     
     unique_chunks = {doc.page_content: doc for doc in todos_chunks}.values()
-    if not unique_chunks:
-        return "NAO_ENCONTRADO"
+    if not unique_chunks: return "NAO_ENCONTRADO"
 
     contexto_final = "\n\n---\n\n".join([doc.page_content for doc in unique_chunks])
     
-    aviso_prompt = aviso_contexto + "\n\n" if aviso_contexto else ""
+    aviso_prompt = f"{aviso_contexto}\n\n" if aviso_contexto else ""
 
-    prompt_geracao_final = (
-        f"{aviso_prompt}Você é um consultor especialista da Agrofel. Com base nos TRECHOS RELEVANTES DAS BULAS, gere uma recomendação clara e objetiva."
-        f"\n\nPERGUNTA ORIGINAL DO AGRICULTOR: \"{query}\"\n\nTRECHOS RELEVANTES DAS BULAS:\n---\n{contexto_final}\n---\nINSTRUÇÕES:\n"
-        "1. Esforce-se para sugerir DOIS produtos distintos. Se for impossível, sugira apenas um.\n"
-        "2. Para cada produto, extraia o nome exato e crie uma descrição curta e convincente.\n"
-        "3. Formato:\n   **Produto 1:** [Nome do Produto]\n   **Descrição:** [Sua descrição]\n\n"
-        "   **Produto 2:** [Nome do Produto]\n   **Descrição:** [Sua descrição]\n"
-        "4. Responda *apenas* no formato especificado. Não inclua nenhuma outra informação, explicação ou comentário extra.\n"
-        "5. Se os trechos não forem suficientes para nenhuma recomendação segura, responda APENAS com: \"NAO_ENCONTRADO\"."
-    )
+    # INSTRUÇÕES REVISTAS (mais flexíveis para informações parciais)
+    prompt_geracao_final = f"""{aviso_prompt}Você é um consultor especialista da Agrofel. Com base nos TRECHOS RELEVANTES DAS BULAS, gere uma recomendação clara e objetiva.
+
+PERGUNTA ORIGINAL: "{query}"
+
+TRECHOS RELEVANTES:
+---
+{contexto_final}
+---
+
+INSTRUÇÕES:
+1. Sugira produtos mesmo quando faltar cultura OU praga específica
+2. Para cada produto:
+   - Extraia o NOME EXATO
+   - Descreva brevemente sua aplicação
+   - Mencione pragas/culturas relevantes dos trechos
+3. Se faltar informação:
+   - Para cultura não especificada: mencione "Verifique registro para sua cultura"
+   - Para praga genérica: sugira para pragas comuns
+4. Formato:
+   **Produto 1:** [Nome]
+   **Aplicação:** [Descrição curta]
+   **Indicações:** [Pragas/Culturas relevantes]
+
+   **Produto 2:** [Nome]
+   **Aplicação:** [Descrição curta]
+   **Indicações:** [Pragas/Culturas relevantes]
+
+5. Se não encontrar produtos adequados, responda APENAS com: "NAO_ENCONTRADO"
+6. NUNCA invente nomes de produtos ou informações técnicas"""
+
     resposta_final = llm.invoke(prompt_geracao_final)
     return resposta_final.content
 
-
 def obter_resposta_assistente(query: str, db, llm):
     """
-    Orquestra o fluxo de trabalho com o Roteador Flexível Aprimorado.
+    Orquestra o fluxo de trabalho com Roteador Melhorado
     """
     # ETAPA 1: Análise Semântica
     llm_com_ferramenta = llm.bind_tools([AnalisePergunta])
     analise = llm_com_ferramenta.invoke(query)
     
+    # Fallback direto se análise falhar
     if not analise.tool_calls:
-        aviso = (
-            "Não consegui analisar a sua pergunta em detalhe, mas aqui estão alguns resultados baseados nas palavras-chave. "
-            "Para uma resposta mais precisa, por favor, especifique a praga e a cultura."
+        return _buscar_e_gerar_recomendacao(
+            query, db, llm, 
+            aviso_contexto="🔍 Buscando soluções para sua consulta..."
         )
-        return _buscar_e_gerar_recomendacao(query, db, llm, aviso_contexto=aviso)
 
     dados_analise = analise.tool_calls[0]['args']
     cultura = dados_analise.get("cultura")
     praga = dados_analise.get("praga")
-    is_praga_generica = dados_analise.get("is_praga_generica")
+    termo_produto = dados_analise.get("termo_produto", False)
 
-    # ETAPA 2: Roteamento Flexível Aprimorado
-    if not praga:
-        aviso = (
-            "Não foi possível identificar a praga mencionada, porém apresento recomendações gerais com base na sua pergunta."
-        )
-        return _buscar_e_gerar_recomendacao(query, db, llm, aviso_contexto=aviso)
+    # ETAPA 2: Roteamento Inteligente (REVISTO)
+    aviso = None
+    
+    # Caso 1: Pergunta muito vazia
+    if not praga and not cultura and not termo_produto:
+        return "Por favor, descreva seu problema agrícola. Ex: 'Preciso de produto para lagarta na soja' ou 'O que usar para ferrugem?'"
+    
+    # Caso 2: Menções parciais com termo de produto
+    if termo_produto:
+        if praga and not cultura:
+            aviso = f"🔍 Buscando produtos para '{praga}'. Verifique o registro para sua cultura."
+        elif cultura and not praga:
+            aviso = f"🔍 Buscando produtos recomendados para '{cultura}'. Especifique a praga para recomendações mais precisas."
+        elif not praga and not cultura:
+            aviso = "🔍 Buscando produtos agrícolas gerais. Especifique cultura/praga para recomendações direcionadas."
+    
+    # Caso 3: Temos pelo menos um elemento relevante
+    return _buscar_e_gerar_recomendacao(
+        query, db, llm, 
+        aviso_contexto=aviso
+    )
 
-    if is_praga_generica:
-        aviso = (
-            f"Sua pergunta sobre '{praga}' em '{cultura or 'sua lavoura'}' é um pouco genérica, "
-            "entretanto seguem recomendações baseadas nos termos fornecidos."
-        )
-        return _buscar_e_gerar_recomendacao(query, db, llm, aviso_contexto=aviso)
-
-    if not cultura:
-        aviso = (
-            "Como a sua pergunta não especificou uma cultura, as recomendações abaixo são gerais. "
-            "Verifique sempre se o produto é registado para a sua cultura específica."
-        )
-        return _buscar_e_gerar_recomendacao(query, db, llm, aviso_contexto=aviso)
-
-    # Pergunta completa e específica: busca normal
-    return _buscar_e_gerar_recomendacao(query, db, llm)
-
-# --- Funções de Notificação (sem alterações) ---
+# --- Funções de Notificação (mantidas) ---
 def enviar_email_confirmacao(pergunta, recomendacao):
     try:
-        email_vendedor, email_remetente, senha_remetente = (
-            st.secrets["EMAIL_VENDEDOR"], st.secrets["EMAIL_REMETENTE"], st.secrets["SENHA_REMETENTE"]
-        )
-        corpo_email = (
-            f'<html><body><p>Olá,</p><p>Um cliente solicitou um pedido através do <b>Assistente de Campo Agrofel</b>.</p>'
-            '<hr><h3>Detalhes da Solicitação:</h3>'
-            f'<p><b>Pergunta do Cliente:</b><br>{pergunta}</p>'
-            '<p><b>Produtos Sugeridos e Confirmados:</b></p>'
-            '<div style="background-color:#f0f0f0; border-left: 5px solid #4CAF50; padding: 10px;">'
-            f'{recomendacao.replace("**", "<b>").replace(chr(10), "<br>")}</div><br>'
-            '<p>Por favor, entre em contato com o cliente para dar seguimento.</p>'
-            '<p>Atenciosamente,<br>Assistente de Campo Agrofel</p>'
-            '</body></html>'
-        )
+        email_vendedor, email_remetente, senha_remetente = st.secrets["EMAIL_VENDEDOR"], st.secrets["EMAIL_REMETENTE"], st.secrets["SENHA_REMETENTE"]
+        corpo_email = f'<html><body><p>Olá,</p><p>Um cliente solicitou um pedido através do <b>Assistente de Campo Agrofel</b>.</p><hr><h3>Detalhes da Solicitação:</h3><p><b>Pergunta do Cliente:</b><br>{pergunta}</p><p><b>Produtos Sugeridos e Confirmados:</b></p><div style="background-color:#f0f0f0; border-left: 5px solid #4CAF50; padding: 10px;">{recomendacao.replace("**", "<b>").replace(chr(10), "<br>")}</div><br><p>Por favor, entre em contato com o cliente para dar seguimento.</p><p>Atenciosamente,<br>Assistente de Campo Agrofel</p></body></html>'
         msg = EmailMessage()
-        msg['Subject'], msg['From'], msg['To'] = (
-            "Novo Pedido de Cliente - Assistente de Campo Agrofel",
-            email_remetente,
-            email_vendedor
-        )
+        msg['Subject'], msg['From'], msg['To'] = "Novo Pedido de Cliente - Assistente de Campo Agrofel", email_remetente, email_vendedor
         msg.add_alternative(corpo_email, subtype='html')
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
             smtp.login(email_remetente, senha_remetente)
@@ -166,14 +166,11 @@ def enviar_email_confirmacao(pergunta, recomendacao):
     except Exception as e:
         st.error(f"Ocorreu um erro ao enviar o email: {e}")
 
-
 def gerar_link_whatsapp(pergunta, recomendacao):
     numero_whatsapp = "5519989963385"
-    texto_base = (
-        f"Olá! Usei o Assistente de Campo Agrofel e gostaria de falar com um especialista.\n\n"
-        f"Minha pergunta foi: \"{pergunta}\"\n\nA recomendação foi:\n{recomendacao.replace('**', '')}\n\nAguardo contato."
-    )
-    return f"https://wa.me/{numero_whatsapp}?text={quote(texto_base)}"
+    texto_base = f"""Olá! Usei o Assistente de Campo Agrofel e gostaria de falar com um especialista.\n\nMinha pergunta foi: "{pergunta}"\n\nA recomendação foi:\n{recomendacao.replace('**', '')}\n\nAguardo contato."""
+    texto_formatado = quote(texto_base)
+    return f"https://wa.me/{numero_whatsapp}?text={texto_formatado}"
 
 # --- INTERFACE DO USUÁRIO ---
 st.title("🌿 Assistente de Campo Agrofel")
@@ -181,17 +178,11 @@ st.markdown("Bem-vindo! Descreva seu problema com pragas na lavoura e encontrare
 
 db, llm = carregar_base_conhecimento()
 
-if 'recomendacao' not in st.session_state:
-    st.session_state.recomendacao = ""
-if 'pergunta' not in st.session_state:
-    st.session_state.pergunta = ""
+if 'recomendacao' not in st.session_state: st.session_state.recomendacao = ""
+if 'pergunta' not in st.session_state: st.session_state.pergunta = ""
 
 with st.form("pergunta_form"):
-    pergunta_usuario = st.text_area(
-        "Qual praga está afetando sua lavoura e em qual cultura?",
-        height=100,
-        placeholder="Ex: Guanxuma na soja"
-    )
+    pergunta_usuario = st.text_area("Qual praga está afetando sua lavoura e em qual cultura?", height=100, placeholder="Ex: Guanxuma na soja ou 'Produto para lagarta'")
     submitted = st.form_submit_button("Buscar Sugestões")
 
 if submitted and pergunta_usuario:
@@ -206,17 +197,16 @@ if submitted and pergunta_usuario:
 if st.session_state.recomendacao:
     if "NAO_ENCONTRADO" in st.session_state.recomendacao:
         st.warning("Não encontrei produtos específicos para sua solicitação em nossa base de dados.")
-    elif any(x in st.session_state.recomendacao for x in ["Para que eu possa ajudar", "A sua pergunta"]) :
-        st.info(st.session_state.recomendacao)
     else:
-        st.subheader("Encontrei estas sugestões para você:")
+        st.subheader("Encontrei estas soluções para você:")
         st.markdown(st.session_state.recomendacao)
     
+    # Lógica dos botões de ação
     st.markdown("---")
-    if any(x in st.session_state.recomendacao for x in ["NAO_ENCONTRADO","Para que eu possa ajudar","A sua pergunta"]):
-        st.info("Gostaria de falar com um de nossos consultores para obter ajuda personalizada?")
-        link_whatsapp_sem_produto = gerar_link_whatsapp(st.session_state.pergunta, "Nenhuma recomendação automática foi gerada.")
-        st.link_button("🗣️ Falar com um Humano via WhatsApp", link_whatsapp_sem_produto, use_container_width=True)
+    if "NAO_ENCONTRADO" in st.session_state.recomendacao:
+         st.info("Gostaria de falar com um de nossos consultores para obter ajuda personalizada?")
+         link_whatsapp_sem_produto = gerar_link_whatsapp(st.session_state.pergunta, "Nenhuma recomendação automática foi gerada.")
+         st.link_button("🗣️ Falar com um Humano via WhatsApp", link_whatsapp_sem_produto, use_container_width=True)
     else:
         st.markdown("O que você gostaria de fazer?")
         col1, col2 = st.columns(2)
