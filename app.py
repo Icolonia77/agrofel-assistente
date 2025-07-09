@@ -113,7 +113,6 @@ def obter_resposta_assistente(query: str, db, llm):
 
 # --- Funções de Notificação (sem alterações) ---
 def enviar_email_confirmacao(pergunta, recomendacao):
-    # ... (código de envio de email aqui)
     try:
         email_vendedor, email_remetente, senha_remetente = st.secrets["EMAIL_VENDEDOR"], st.secrets["EMAIL_REMETENTE"], st.secrets["SENHA_REMETENTE"]
         corpo_email = f'<html><body><p>Olá,</p><p>Um cliente solicitou um pedido através do <b>Assistente de Campo Agrofel</b>.</p><hr><h3>Detalhes da Solicitação:</h3><p><b>Pergunta do Cliente:</b><br>{pergunta}</p><p><b>Produtos Sugeridos e Confirmados:</b></p><div style="background-color:#f0f0f0; border-left: 5px solid #4CAF50; padding: 10px;">{recomendacao.replace("**", "<b>").replace(chr(10), "<br>")}</div><br><p>Por favor, entre em contato com o cliente para dar seguimento.</p><p>Atenciosamente,<br>Assistente de Campo Agrofel</p></body></html>'
@@ -129,7 +128,6 @@ def enviar_email_confirmacao(pergunta, recomendacao):
         st.error(f"Ocorreu um erro ao enviar o email: {e}")
 
 def gerar_link_whatsapp(pergunta, recomendacao):
-    # ... (código do link WhatsApp aqui)
     numero_whatsapp = "5519989963385"
     texto_base = f"""Olá! Usei o Assistente de Campo Agrofel e gostaria de falar com um especialista.\n\nMinha pergunta foi: "{pergunta}"\n\nA recomendação foi:\n{recomendacao.replace('**', '')}\n\nAguardo contato."""
     texto_formatado = quote(texto_base)
@@ -183,3 +181,4 @@ if st.session_state.recomendacao:
         with col2:
             link_whatsapp_com_produto = gerar_link_whatsapp(st.session_state.pergunta, st.session_state.recomendacao)
             st.link_button("🗣️ Falar com um Humano via WhatsApp", link_whatsapp_com_produto, use_container_width=True)
+
