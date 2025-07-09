@@ -1,4 +1,4 @@
-# app.py (Versão Final com Agente de Análise Semântica)
+# app.py (Versão Final com Roteador Flexível)
 import streamlit as st
 import os
 import smtplib
@@ -8,7 +8,7 @@ from urllib.parse import quote
 import google.generativeai as genai
 from dotenv import load_dotenv
 
-# Imports para LangChain e Pydantic (para a estrutura da ferramenta)
+# Imports para LangChain e Pydantic
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 from langchain_community.vectorstores import FAISS
 from langchain.prompts import ChatPromptTemplate
@@ -56,7 +56,7 @@ def carregar_base_conhecimento():
         st.error(f"Ocorreu um erro ao carregar a base de conhecimento: {e}")
         return None, None
 
-def _buscar_e_gerar_recomendacao(query: str, db, llm):
+def _buscar_e_gerar_recomendacao(query: str, db, llm, aviso_contexto: str | None = None):
     """ Executa o fluxo de RAG com Transformação de Consulta. """
     template_transformacao = "Você é um especialista em agronomia. Transforme a pergunta do utilizador em 3 consultas de busca concisas e variadas para uma base de dados vetorial. Responda apenas com as consultas, uma por linha.\n\nPergunta Original: {pergunta}\n\nConsultas de Busca:"
     prompt_transformacao = ChatPromptTemplate.from_template(template_transformacao)
@@ -65,28 +65,30 @@ def _buscar_e_gerar_recomendacao(query: str, db, llm):
     
     todos_chunks = []
     for consulta in consultas_geradas:
-        todos_chunks.extend(db.similarity_search(consulta, k=3))
+        todos_chunks.extend(db.similarity_search(consulta, k=4)) # Aumentamos para k=4 para mais contexto
     
     unique_chunks = {doc.page_content: doc for doc in todos_chunks}.values()
     if not unique_chunks: return "NAO_ENCONTRADO"
 
     contexto_final = "\n\n---\n\n".join([doc.page_content for doc in unique_chunks])
     
-    prompt_geracao_final = f"""Você é um consultor especialista da Agrofel. Com base nos TRECHOS RELEVANTES DAS BULAS, gere uma recomendação clara e objetiva.\n\nPERGUNTA ORIGINAL DO AGRICULTOR: "{query}"\n\nTRECHOS RELEVANTES DAS BULAS:\n---\n{contexto_final}\n---\nINSTRUÇÕES:\n1. Esforce-se para sugerir DOIS produtos distintos. Se for impossível, sugira apenas um.\n2. Para cada produto, extraia o nome exato e crie uma descrição curta e convincente.\n3. Formato:\n   **Produto 1:** [Nome do Produto]\n   **Descrição:** [Sua descrição]\n\n   **Produto 2:** [Nome do Produto]\n   **Descrição:** [Sua descrição]\n4. Responda *apenas* no formato especificado. Não inclua nenhuma outra informação, explicação ou comentário extra.\n5. Se os trechos não forem suficientes para nenhuma recomendação segura, responda APENAS com: "NAO_ENCONTRADO"."""
+    aviso_prompt = ""
+    if aviso_contexto:
+        aviso_prompt = f"AVISO IMPORTANTE: {aviso_contexto}\n\n"
+
+    prompt_geracao_final = f"""{aviso_prompt}Você é um consultor especialista da Agrofel. Com base nos TRECHOS RELEVANTES DAS BULAS, gere uma recomendação clara e objetiva.\n\nPERGUNTA ORIGINAL DO AGRICULTOR: "{query}"\n\nTRECHOS RELEVANTES DAS BULAS:\n---\n{contexto_final}\n---\nINSTRUÇÕES:\n1. Esforce-se para sugerir DOIS produtos distintos. Se for impossível, sugira apenas um.\n2. Para cada produto, extraia o nome exato e crie uma descrição curta e convincente.\n3. Formato:\n   **Produto 1:** [Nome do Produto]\n   **Descrição:** [Sua descrição]\n\n   **Produto 2:** [Nome do Produto]\n   **Descrição:** [Sua descrição]\n4. Responda *apenas* no formato especificado. Não inclua nenhuma outra informação, explicação ou comentário extra.\n5. Se os trechos não forem suficientes para nenhuma recomendação segura, responda APENAS com: "NAO_ENCONTRADO"."""
     resposta_final = llm.invoke(prompt_geracao_final)
     return resposta_final.content
 
 def obter_resposta_assistente(query: str, db, llm):
     """
-    Orquestra o fluxo de trabalho do agente, começando pela análise semântica.
+    Orquestra o fluxo de trabalho com o Roteador Flexível.
     """
-    # ETAPA 1: Análise Semântica com Function Calling
+    # ETAPA 1: Análise Semântica
     llm_com_ferramenta = llm.bind_tools([AnalisePergunta])
     analise = llm_com_ferramenta.invoke(query)
     
-    # Verifica se o LLM usou a ferramenta
     if not analise.tool_calls:
-        # Se não usou a ferramenta, a pergunta é provavelmente muito vaga.
         return "Não consegui entender a sua pergunta. Por favor, tente reformulá-la incluindo uma cultura e uma praga, como 'capim-amargoso na soja'."
 
     dados_analise = analise.tool_calls[0]['args']
@@ -94,28 +96,29 @@ def obter_resposta_assistente(query: str, db, llm):
     praga = dados_analise.get("praga")
     is_praga_generica = dados_analise.get("is_praga_generica")
 
-    # ETAPA 2: Roteamento Inteligente
-    if not cultura or not praga:
-        return "Para que eu possa ajudar, a sua pergunta precisa de mencionar tanto a **cultura** como a **praga** que a está a afetar. Por exemplo: 'Como tratar capim-amargoso na soja?'"
+    # ETAPA 2: Roteamento Flexível
+    if not praga:
+        return "Para que eu possa ajudar, a sua pergunta precisa de mencionar a **praga** que a está a afetar. Por exemplo: 'Como tratar **guanxuma** na soja?'"
     
     if is_praga_generica:
-        return f"A sua pergunta sobre '{praga}' em '{cultura}' é um pouco geral. Para uma recomendação precisa, por favor, tente ser mais específico. Por exemplo, em vez de 'praga em {cultura}', tente 'lagarta em {cultura}' ou 'percevejo em {cultura}'."
+        return f"A sua pergunta sobre '{praga}' em '{cultura or 'sua lavoura'}' é um pouco geral. Para uma recomendação precisa, por favor, tente ser mais específico. Por exemplo, em vez de 'praga em {cultura or 'soja'}', tente 'lagarta em {cultura or 'soja'}'."
 
-    # ETAPA 3: Se a pergunta for específica, executa o fluxo de busca
+    if not cultura:
+        # Praga específica, mas sem cultura. Procede com a busca, mas com um aviso.
+        aviso = "O utilizador não especificou uma cultura. As suas recomendações devem, se possível, mencionar para quais culturas os produtos são indicados."
+        return _buscar_e_gerar_recomendacao(query, db, llm, aviso_contexto=aviso)
+
+    # Pergunta completa e específica. Procede com a busca normal.
     return _buscar_e_gerar_recomendacao(query, db, llm)
 
 # --- Funções de Notificação (sem alterações) ---
 def enviar_email_confirmacao(pergunta, recomendacao):
     # ... (código de envio de email aqui)
     try:
-        email_vendedor = st.secrets["EMAIL_VENDEDOR"]
-        email_remetente = st.secrets["EMAIL_REMETENTE"]
-        senha_remetente = st.secrets["SENHA_REMETENTE"]
+        email_vendedor, email_remetente, senha_remetente = st.secrets["EMAIL_VENDEDOR"], st.secrets["EMAIL_REMETENTE"], st.secrets["SENHA_REMETENTE"]
         corpo_email = f'<html><body><p>Olá,</p><p>Um cliente solicitou um pedido através do <b>Assistente de Campo Agrofel</b>.</p><hr><h3>Detalhes da Solicitação:</h3><p><b>Pergunta do Cliente:</b><br>{pergunta}</p><p><b>Produtos Sugeridos e Confirmados:</b></p><div style="background-color:#f0f0f0; border-left: 5px solid #4CAF50; padding: 10px;">{recomendacao.replace("**", "<b>").replace(chr(10), "<br>")}</div><br><p>Por favor, entre em contato com o cliente para dar seguimento.</p><p>Atenciosamente,<br>Assistente de Campo Agrofel</p></body></html>'
         msg = EmailMessage()
-        msg['Subject'] = "Novo Pedido de Cliente - Assistente de Campo Agrofel"
-        msg['From'] = email_remetente
-        msg['To'] = email_vendedor
+        msg['Subject'], msg['From'], msg['To'] = "Novo Pedido de Cliente - Assistente de Campo Agrofel", email_remetente, email_vendedor
         msg.add_alternative(corpo_email, subtype='html')
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
             smtp.login(email_remetente, senha_remetente)
@@ -180,9 +183,3 @@ if st.session_state.recomendacao:
         with col2:
             link_whatsapp_com_produto = gerar_link_whatsapp(st.session_state.pergunta, st.session_state.recomendacao)
             st.link_button("🗣️ Falar com um Humano via WhatsApp", link_whatsapp_com_produto, use_container_width=True)
-
-
-
-
-
-
