@@ -89,7 +89,9 @@ def obter_resposta_assistente(query: str, db, llm):
     analise = llm_com_ferramenta.invoke(query)
     
     if not analise.tool_calls:
-        return "Não consegui entender a sua pergunta. Por favor, tente reformulá-la incluindo uma cultura e uma praga, como 'capim-amargoso na soja'."
+        # Fallback: Se a análise falhar, tenta a busca direta com a ressalva.
+        aviso = "Não consegui analisar a sua pergunta em detalhe, mas aqui estão alguns resultados baseados nas palavras-chave. Para uma resposta mais precisa, por favor, especifique a praga e a cultura."
+        return _buscar_e_gerar_recomendacao(query, db, llm, aviso_contexto=aviso)
 
     dados_analise = analise.tool_calls[0]['args']
     cultura = dados_analise.get("cultura")
@@ -105,7 +107,7 @@ def obter_resposta_assistente(query: str, db, llm):
 
     if not cultura:
         # Praga específica, mas sem cultura. Procede com a busca, mas com um aviso.
-        aviso = "O utilizador não especificou uma cultura. As suas recomendações devem, se possível, mencionar para quais culturas os produtos são indicados."
+        aviso = "Como a sua pergunta não especificou uma cultura, as recomendações abaixo são gerais. Verifique sempre se o produto é registado para a sua cultura específica."
         return _buscar_e_gerar_recomendacao(query, db, llm, aviso_contexto=aviso)
 
     # Pergunta completa e específica. Procede com a busca normal.
@@ -181,4 +183,5 @@ if st.session_state.recomendacao:
         with col2:
             link_whatsapp_com_produto = gerar_link_whatsapp(st.session_state.pergunta, st.session_state.recomendacao)
             st.link_button("🗣️ Falar com um Humano via WhatsApp", link_whatsapp_com_produto, use_container_width=True)
+
 
