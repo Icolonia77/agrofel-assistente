@@ -1,7 +1,8 @@
-# app.py (Versão Final com Prompt Ajustado e Notificações)
+# app.py (Versão Final com Agente de Múltiplas Etapas)
 import streamlit as st
 import os
 import smtplib
+import json
 from email.message import EmailMessage
 from urllib.parse import quote
 
@@ -49,30 +50,57 @@ def carregar_base_conhecimento():
         st.error(f"Ocorreu um erro ao carregar a base de conhecimento: {e}")
         return None, None
 
-def agente_especialista_recomenda(query: str, db, llm):
+def _analisar_pergunta(query: str, llm):
     """
-    Implementa a lógica RAG com Transformação de Consulta para maior robustez.
+    ETAPA 1: Agente de Triagem. Analisa a pergunta para extrair entidades.
     """
-    if db is None or llm is None:
-        return "Erro: A base de conhecimento não está carregada."
+    template_analise = """
+    Analise a pergunta de um agricultor. Extraia a CULTURA e a PRAGA.
+    Para cada entidade, determine se é ESPECÍFICA (um nome concreto como 'soja', 'guanxuma') ou GENÉRICA (uma palavra geral como 'praga', 'lavoura', 'veneno').
+    Se uma entidade não for mencionada, o seu valor deve ser null.
+    Responda APENAS com um objeto JSON.
 
+    Exemplos:
+    Pergunta: "Qual produto pra tratar guanxuma?"
+    JSON: {{"cultura": null, "tipo_cultura": null, "praga": "guanxuma", "tipo_praga": "ESPECÍFICA"}}
+
+    Pergunta: "Qual produto pra praga em plantação de soja?"
+    JSON: {{"cultura": "soja", "tipo_cultura": "ESPECÍFICA", "praga": "praga", "tipo_praga": "GENÉRICA"}}
+
+    Pergunta: "{pergunta}"
+    JSON:
+    """
+    prompt_analise = ChatPromptTemplate.from_template(template_analise)
+    cadeia_analise = prompt_analise | llm | StrOutputParser()
+    
+    try:
+        resultado_json = cadeia_analise.invoke({"pergunta": query})
+        return json.loads(resultado_json)
+    except (json.JSONDecodeError, Exception):
+        # Fallback em caso de erro de parsing do JSON
+        return {"cultura": query, "tipo_cultura": "ESPECÍFICA", "praga": query, "tipo_praga": "ESPECÍFICA"}
+
+
+def _buscar_e_gerar_recomendacao(query: str, db, llm):
+    """
+    ETAPA 2 (se aplicável): Executa o RAG com Transformação de Consulta.
+    """
+    # 2.1 Transformação da Consulta
     template_transformacao = """Você é um especialista em agronomia. Sua tarefa é transformar a pergunta de um utilizador numa lista de 3 consultas de busca otimizadas para uma base de dados vetorial.
     As consultas devem ser concisas e variadas para cobrir diferentes aspetos da pergunta.
     Responda apenas com as consultas, uma por linha.
 
     Pergunta Original: {pergunta}
-
     Consultas de Busca:
     """
     prompt_transformacao = ChatPromptTemplate.from_template(template_transformacao)
-    
     cadeia_transformacao = prompt_transformacao | llm | StrOutputParser()
     consultas_geradas = cadeia_transformacao.invoke({"pergunta": query}).strip().split('\n')
 
+    # 2.2 Busca Aumentada
     todos_chunks = []
     for consulta in consultas_geradas:
         todos_chunks.extend(db.similarity_search(consulta, k=3))
-    
     unique_chunks = {doc.page_content: doc for doc in todos_chunks}.values()
 
     if not unique_chunks:
@@ -80,63 +108,64 @@ def agente_especialista_recomenda(query: str, db, llm):
 
     contexto_final = "\n\n---\n\n".join([doc.page_content for doc in unique_chunks])
 
-    # --- PROMPT FINAL AJUSTADO ---
+    # 2.3 Geração da Resposta Final
     prompt_geracao_final = f"""Você é um consultor especialista da Agrofel. Com base nos TRECHOS RELEVANTES DAS BULAS, gere uma recomendação clara e objetiva.
-
     PERGUNTA ORIGINAL DO AGRICULTOR: "{query}"
-
-    TRECHOS RELEVANTES DAS BULAS (obtidos de múltiplas buscas):
+    TRECHOS RELEVANTES DAS BULAS:
     ---
     {contexto_final}
     ---
     INSTRUÇÕES:
-    1. Esforce-se para sugerir DOIS produtos distintos que respondam à pergunta.
-    2. Se, após uma análise cuidadosa, for absolutamente impossível encontrar um segundo produto relevante, então sugira apenas um.
-    3. Para cada produto, extraia o nome exato e crie uma descrição curta e convincente.
-    4. Formato:
+    1. Esforce-se para sugerir DOIS produtos distintos. Se for impossível, sugira apenas um.
+    2. Para cada produto, extraia o nome exato e crie uma descrição curta e convincente.
+    3. Formato:
        **Produto 1:** [Nome do Produto]
        **Descrição:** [Sua descrição]
-
        **Produto 2:** [Nome do Produto]
        **Descrição:** [Sua descrição]
-    5. Se os trechos não forem suficientes para nenhuma recomendação segura, responda APENAS com: "NAO_ENCONTRADO".
+    4. Se os trechos não forem suficientes para nenhuma recomendação segura, responda APENAS com: "NAO_ENCONTRADO".
     """
     resposta_final = llm.invoke(prompt_geracao_final)
     return resposta_final.content
 
+def obter_resposta_assistente(query: str, db, llm):
+    """
+    Orquestra o fluxo de trabalho do agente de múltiplas etapas.
+    """
+    analise = _analisar_pergunta(query, llm)
+    
+    cultura = analise.get("cultura")
+    tipo_cultura = analise.get("tipo_cultura")
+    praga = analise.get("praga")
+    tipo_praga = analise.get("tipo_praga")
+
+    # Lógica do Roteador
+    if not cultura or not praga:
+        return "Para que eu possa ajudar, preciso que a sua pergunta contenha tanto a **praga** como a **cultura** afetada. Por exemplo: 'Como tratar capim-amargoso na soja?'"
+    
+    if tipo_cultura == "GENÉRICA" or tipo_praga == "GENÉRICA":
+        return f"A sua pergunta é um pouco geral. Para uma recomendação precisa, por favor, tente ser mais específico. Por exemplo, em vez de 'praga em {cultura}', tente 'lagarta em {cultura}' ou 'percevejo em {cultura}'."
+
+    # Se a pergunta for específica, executa o fluxo de busca
+    return _buscar_e_gerar_recomendacao(query, db, llm)
+
+
+# --- Funções de Notificação (permanecem as mesmas) ---
 def enviar_email_confirmacao(pergunta, recomendacao):
-    """
-    Envia um email de notificação para o vendedor.
-    """
+    # ... (código de envio de email aqui, sem alterações)
     try:
         email_vendedor = st.secrets["EMAIL_VENDEDOR"]
         email_remetente = st.secrets["EMAIL_REMETENTE"]
         senha_remetente = st.secrets["SENHA_REMETENTE"]
     except (FileNotFoundError, KeyError):
-        st.error("As credenciais de email não estão configuradas nos segredos do Streamlit. O email não pode ser enviado.")
+        st.error("As credenciais de email não estão configuradas nos segredos do Streamlit.")
         return
-
-    corpo_email = f"""
-    <html><body>
-        <p>Olá,</p>
-        <p>Um cliente solicitou um pedido através do <b>Assistente de Campo Agrofel</b>.</p><hr>
-        <h3>Detalhes da Solicitação:</h3>
-        <p><b>Pergunta do Cliente:</b><br>{pergunta}</p>
-        <p><b>Produtos Sugeridos e Confirmados:</b></p>
-        <div style="background-color:#f0f0f0; border-left: 5px solid #4CAF50; padding: 10px;">
-            {recomendacao.replace('**', '<b>').replace('**', '</b>').replace(chr(10), '<br>')}
-        </div><br>
-        <p>Por favor, entre em contato com o cliente para dar seguimento.</p>
-        <p>Atenciosamente,<br>Assistente de Campo Agrofel</p>
-    </body></html>
-    """
-
+    corpo_email = f'<html><body><p>Olá,</p><p>Um cliente solicitou um pedido através do <b>Assistente de Campo Agrofel</b>.</p><hr><h3>Detalhes da Solicitação:</h3><p><b>Pergunta do Cliente:</b><br>{pergunta}</p><p><b>Produtos Sugeridos e Confirmados:</b></p><div style="background-color:#f0f0f0; border-left: 5px solid #4CAF50; padding: 10px;">{recomendacao.replace("**", "<b>").replace(chr(10), "<br>")}</div><br><p>Por favor, entre em contato com o cliente para dar seguimento.</p><p>Atenciosamente,<br>Assistente de Campo Agrofel</p></body></html>'
     msg = EmailMessage()
     msg['Subject'] = "Novo Pedido de Cliente - Assistente de Campo Agrofel"
     msg['From'] = email_remetente
     msg['To'] = email_vendedor
     msg.add_alternative(corpo_email, subtype='html')
-
     try:
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
             smtp.login(email_remetente, senha_remetente)
@@ -147,9 +176,7 @@ def enviar_email_confirmacao(pergunta, recomendacao):
         st.error(f"Ocorreu um erro ao enviar o email: {e}")
 
 def gerar_link_whatsapp(pergunta, recomendacao):
-    """
-    Gera um link "click to chat" do WhatsApp com uma mensagem pré-formatada.
-    """
+    # ... (código do link WhatsApp aqui, sem alterações)
     numero_whatsapp = "5519989963385"
     texto_base = f"""Olá! Usei o Assistente de Campo Agrofel e gostaria de falar com um especialista.\n\nMinha pergunta foi: "{pergunta}"\n\nA recomendação foi:\n{recomendacao.replace('**', '')}\n\nAguardo contato."""
     texto_formatado = quote(texto_base)
@@ -173,18 +200,23 @@ if submitted and pergunta_usuario:
     if db is not None:
         with st.spinner("Analisando as melhores soluções para você..."):
             st.session_state.pergunta = pergunta_usuario
-            recomendacao_gerada = agente_especialista_recomenda(pergunta_usuario, db, llm)
+            # A chamada principal agora é para a função orquestradora
+            recomendacao_gerada = obter_resposta_assistente(pergunta_usuario, db, llm)
             st.session_state.recomendacao = recomendacao_gerada
     else:
         st.error("A base de conhecimento não pôde ser carregada.")
 
 if st.session_state.recomendacao:
+    # A lógica de exibição da resposta foi ligeiramente ajustada para o novo tipo de resposta informativa
     if "NAO_ENCONTRADO" in st.session_state.recomendacao:
         st.warning("Não encontrei produtos específicos para sua solicitação em nossa base de dados.")
         st.info("Gostaria de falar com um de nossos consultores para obter ajuda personalizada?")
         link_whatsapp_sem_produto = gerar_link_whatsapp(st.session_state.pergunta, "Nenhuma recomendação automática foi gerada.")
         st.link_button("🗣️ Falar com um Humano via WhatsApp", link_whatsapp_sem_produto, use_container_width=True)
+    elif "Para que eu possa ajudar" in st.session_state.recomendacao or "A sua pergunta é um pouco geral" in st.session_state.recomendacao:
+        st.info(st.session_state.recomendacao) # Exibe a mensagem informativa pedindo mais detalhes
     else:
+        # Exibe a recomendação de produtos como antes
         st.subheader("Encontrei estas sugestões para você:")
         st.markdown(st.session_state.recomendacao)
         st.markdown("---")
@@ -197,6 +229,7 @@ if st.session_state.recomendacao:
         with col2:
             link_whatsapp_com_produto = gerar_link_whatsapp(st.session_state.pergunta, st.session_state.recomendacao)
             st.link_button("🗣️ Falar com um Humano via WhatsApp", link_whatsapp_com_produto, use_container_width=True)
+
 
 
 
