@@ -1,4 +1,4 @@
-# app.py (Versão Protótipo Conversacional)
+# app.py (Versão Final com Interface Conversacional)
 import streamlit as st
 import os
 import smtplib
@@ -30,12 +30,16 @@ if not api_key:
 genai.configure(api_key=api_key)
 
 
-# --- DEFINIÇÃO DA FERRAMENTA PARA ANÁLISE SEMÂNTICA ---
-class AnalisePergunta(BaseModel):
-    """Schema para analisar a pergunta de um agricultor."""
+# --- DEFINIÇÃO DAS FERRAMENTAS PARA O AGENTE ---
+class AnalisePerguntaGeral(BaseModel):
+    """Schema para analisar uma pergunta geral sobre um problema agrícola."""
     cultura: str | None = Field(description="A cultura agrícola mencionada, como 'soja' ou 'milho'. Null se não mencionada.")
-    praga: str | None = Field(description="A praga mencionada, como 'lagarta', 'guanxuma' ou 'ferrugem'. Null se não mencionada.")
-    is_praga_generica: bool = Field(description="True se a praga for uma palavra geral como 'praga', 'doença', 'problema'. False caso contrário.")
+    praga: str | None = Field(description="A praga mencionada, como 'lagarta' ou 'guanxuma'. Null se não mencionada.")
+
+class AnalisePerguntaTecnica(BaseModel):
+    """Schema para analisar uma pergunta técnica sobre um produto específico."""
+    nome_produto: str = Field(description="O nome exato do produto sobre o qual se pergunta.")
+    pergunta_tecnica: str = Field(description="A pergunta específica sobre o produto, como 'qual a dosagem' ou 'modo de aplicação'.")
 
 
 # --- FUNÇÕES DE LÓGICA (BACKEND DA APLICAÇÃO) ---
@@ -56,9 +60,9 @@ def carregar_base_conhecimento():
         st.error(f"Ocorreu um erro ao carregar a base de conhecimento: {e}")
         return None, None
 
-def _buscar_e_gerar_recomendacao(query: str, db, llm, aviso_contexto: str | None = None):
-    """ Executa o fluxo de RAG com Transformação de Consulta. """
-    template_transformacao = "Você é um especialista em agronomia. Transforme a pergunta do utilizador em 3 consultas de busca concisas e variadas para uma base de dados vetorial. Responda apenas com as consultas, uma por linha.\n\nPergunta Original: {pergunta}\n\nConsultas de Busca:"
+def buscar_recomendacao_produto(query: str, db, llm):
+    """ Executa o fluxo de RAG para encontrar produtos. """
+    template_transformacao = "Transforme a pergunta do utilizador em 3 consultas de busca concisas e variadas para uma base de dados vetorial. Responda apenas com as consultas, uma por linha.\n\nPergunta Original: {pergunta}"
     prompt_transformacao = ChatPromptTemplate.from_template(template_transformacao)
     cadeia_transformacao = prompt_transformacao | llm | StrOutputParser()
     consultas_geradas = cadeia_transformacao.invoke({"pergunta": query}).strip().split('\n')
@@ -72,35 +76,63 @@ def _buscar_e_gerar_recomendacao(query: str, db, llm, aviso_contexto: str | None
 
     contexto_final = "\n\n---\n\n".join([doc.page_content for doc in unique_chunks])
     
-    aviso_prompt = f"AVISO IMPORTANTE: {aviso_contexto}\n\n" if aviso_contexto else ""
-
-    prompt_geracao_final = f"""{aviso_prompt}Você é um consultor especialista da Agrofel. Com base nos TRECHOS RELEVANTES DAS BULAS, gere uma recomendação clara e objetiva.\n\nPERGUNTA ORIGINAL DO AGRICULTOR: "{query}"\n\nTRECHOS RELEVANTES DAS BULAS:\n---\n{contexto_final}\n---\nINSTRUÇÕES:\n1. Esforce-se para sugerir DOIS produtos distintos. Se for impossível, sugira apenas um.\n2. Para cada produto, extraia o nome exato e crie uma descrição curta e convincente.\n3. Formato:\n   **Produto 1:** [Nome do Produto]\n   **Descrição:** [Sua descrição]\n\n   **Produto 2:** [Nome do Produto]\n   **Descrição:** [Sua descrição]\n4. Responda *apenas* no formato especificado. Não inclua nenhuma outra informação, explicação ou comentário extra.\n5. Se os trechos não forem suficientes para nenhuma recomendação segura, responda APENAS com: "NAO_ENCONTRADO"."""
+    prompt_geracao_final = f"""Você é um consultor especialista da Agrofel. Com base nos TRECHOS RELEVANTES DAS BULAS, gere uma recomendação clara.\n\nPERGUNTA ORIGINAL: "{query}"\n\nTRECHOS RELEVANTES:\n---\n{contexto_final}\n---\nINSTRUÇÕES:\n1. Sugira até DOIS produtos distintos.\n2. Formato:\n   **Produto 1:** [Nome]\n   **Descrição:** [Descrição curta e convincente]\n\n   **Produto 2:** [Nome]\n   **Descrição:** [Descrição curta e convincente]\n3. Se não encontrar produtos, responda APENAS com: "NAO_ENCONTRADO"."""
     resposta_final = llm.invoke(prompt_geracao_final)
     return resposta_final.content
 
-def obter_resposta_assistente(query: str, db, llm):
-    """ Orquestra o fluxo de trabalho com o Roteador Flexível. """
-    llm_com_ferramenta = llm.bind_tools([AnalisePergunta])
-    analise = llm_com_ferramenta.invoke(query)
+def buscar_resposta_tecnica(produto: str, pergunta: str, db, llm):
+    """ Busca informações técnicas específicas sobre um produto. """
+    query = f"informações sobre {produto}: {pergunta}"
+    docs = db.similarity_search(query, k=5)
+    contexto = "\n\n---\n\n".join([doc.page_content for doc in docs])
     
+    prompt = f"""Você é um assistente técnico da Agrofel. Responda à pergunta do usuário baseando-se APENAS nas informações das bulas.\n\nPRODUTO: {produto}\nPERGUNTA: {pergunta}\n\nINFORMAÇÕES EXTRAÍDAS:\n---\n{contexto}\n---\nINSTRUÇÕES:\n1. Seja técnico e preciso.\n2. Se não encontrar a informação, indique "Informação não disponível na bula." e sugira consultar um engenheiro agrônomo."""
+    resposta = llm.invoke(prompt)
+    return resposta.content
+
+def orquestrador_conversacional(query: str, chat_history: list, db, llm):
+    """
+    O cérebro do agente. Decide qual ação tomar com base na pergunta do usuário e no histórico.
+    """
+    # Adiciona o histórico ao prompt para dar contexto ao LLM
+    historico_formatado = "\n".join([f"{msg['role']}: {msg['content']}" for msg in chat_history])
+    
+    prompt_roteador = f"""
+Você é o orquestrador de um chatbot de agronomia. Analise a ÚLTIMA PERGUNTA DO UTILIZADOR à luz do HISTÓRICO DA CONVERSA.
+Decida qual ferramenta usar: `buscar_recomendacao_produto` ou `buscar_resposta_tecnica`.
+
+- Use `buscar_resposta_tecnica` se a pergunta for sobre um produto específico já mencionado no histórico.
+- Caso contrário, use `buscar_recomendacao_produto`.
+
+HISTÓRICO DA CONVERSA:
+{historico_formatado}
+
+ÚLTIMA PERGUNTA DO UTILIZADOR: {query}
+"""
+    
+    # Define as ferramentas que o LLM pode usar
+    llm_com_ferramentas = llm.bind_tools([AnalisePerguntaGeral, AnalisePerguntaTecnica])
+    
+    # O LLM decide qual ferramenta chamar
+    analise = llm_com_ferramentas.invoke(prompt_roteador)
+
     if not analise.tool_calls:
-        aviso = "Não consegui analisar a sua pergunta em detalhe, mas aqui estão alguns resultados baseados nas palavras-chave. Para uma resposta mais precisa, por favor, especifique a praga e a cultura."
-        return _buscar_e_gerar_recomendacao(query, db, llm, aviso_contexto=aviso)
-
-    dados_analise = analise.tool_calls[0]['args']
-    cultura, praga, is_praga_generica = dados_analise.get("cultura"), dados_analise.get("praga"), dados_analise.get("is_praga_generica")
-
-    if not praga:
-        return "Para que eu possa ajudar, a sua pergunta precisa de mencionar a **praga** que a está a afetar. Por exemplo: 'Como tratar **guanxuma** na soja?'"
+        return "Não consegui entender a sua pergunta. Poderia reformulá-la?"
     
-    if is_praga_generica:
-        return f"A sua pergunta sobre '{praga}' em '{cultura or 'sua lavoura'}' é um pouco geral. Para uma recomendação precisa, por favor, tente ser mais específico. Por exemplo, em vez de 'praga em {cultura or 'soja'}', tente 'lagarta em {cultura or 'soja'}'."
+    # Executa a ferramenta escolhida pelo LLM
+    ferramenta_chamada = analise.tool_calls[0]
+    nome_ferramenta = ferramenta_chamada['name']
+    argumentos = ferramenta_chamada['args']
 
-    if not cultura:
-        aviso = "Como a sua pergunta não especificou uma cultura, as recomendações abaixo são gerais. Verifique sempre se o produto é registado para a sua cultura específica."
-        return _buscar_e_gerar_recomendacao(query, db, llm, aviso_contexto=aviso)
+    if nome_ferramenta == AnalisePerguntaTecnica.__name__:
+        produto = argumentos.get("nome_produto")
+        pergunta_tecnica = argumentos.get("pergunta_tecnica")
+        if produto and pergunta_tecnica:
+            return buscar_resposta_tecnica(produto, pergunta_tecnica, db, llm)
+    
+    # Por defeito, ou se a ferramenta for AnalisePerguntaGeral, busca uma recomendação de produto.
+    return buscar_recomendacao_produto(query, db, llm)
 
-    return _buscar_e_gerar_recomendacao(query, db, llm)
 
 # --- Funções de Notificação (sem alterações) ---
 def enviar_email_confirmacao(pergunta, recomendacao):
@@ -124,7 +156,8 @@ def gerar_link_whatsapp(pergunta, recomendacao):
     texto_formatado = quote(texto_base)
     return f"https://wa.me/{numero_whatsapp}?text={texto_formatado}"
 
-# --- INTERFACE DO USUÁRIO ---
+
+# --- INTERFACE DO USUÁRIO (CHAT) ---
 st.title("🌿 Assistente de Campo Agrofel")
 st.markdown("---")
 
@@ -139,9 +172,20 @@ db, llm = carregar_base_conhecimento()
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+        # Adicionar botões de ação às mensagens do assistente que contêm recomendações
+        if message["role"] == "assistant" and "Produto 1:" in message["content"]:
+            st.markdown("---")
+            col1, col2 = st.columns(2)
+            with col1:
+                # O uso de uma chave única para o botão é crucial
+                if st.button("✅ Confirmar Pedido", key=f"email_{len(st.session_state.messages)}", use_container_width=True):
+                    enviar_email_confirmacao(st.session_state.messages[-2]['content'], message['content'])
+            with col2:
+                link_whatsapp = gerar_link_whatsapp(st.session_state.messages[-2]['content'], message['content'])
+                st.link_button("🗣️ Falar com um Humano", link_whatsapp, use_container_width=True)
 
 # Input do utilizador
-if prompt := st.chat_input("Descreva o seu problema... (ex: guanxuma na soja)"):
+if prompt := st.chat_input("Descreva o seu problema ou faça uma pergunta..."):
     # Adicionar mensagem do utilizador ao histórico e à tela
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -151,22 +195,16 @@ if prompt := st.chat_input("Descreva o seu problema... (ex: guanxuma na soja)"):
     if db is not None and llm is not None:
         with st.chat_message("assistant"):
             with st.spinner("A pensar..."):
-                response = obter_resposta_assistente(prompt, db, llm)
-                st.markdown(response)
+                # Passa o histórico da conversa para o orquestrador
+                historico_para_analise = st.session_state.messages[:-1] # Exclui a pergunta atual
+                response = orquestrador_conversacional(prompt, historico_para_analise, db, llm)
                 
-                # Adicionar botões de ação se a resposta for uma recomendação de produto
-                if "Produto 1:" in response:
-                    st.markdown("---")
-                    st.markdown("Esta recomendação ajuda?")
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if st.button("✅ Sim, Confirmar Pedido", use_container_width=True):
-                            enviar_email_confirmacao(prompt, response)
-                            # Não limpa o estado aqui para manter a conversa
-                    with col2:
-                        link_whatsapp = gerar_link_whatsapp(prompt, response)
-                        st.link_button("🗣️ Não, Falar com um Humano", link_whatsapp, use_container_width=True)
+                # Armazena a resposta antes de exibir
+                st.session_state.response_holder = response
 
-        st.session_state.messages.append({"role": "assistant", "content": response})
+        # Adiciona a resposta do assistente ao histórico
+        st.session_state.messages.append({"role": "assistant", "content": st.session_state.response_holder})
+        # Força o recarregamento da página para exibir a nova mensagem com os botões
+        st.rerun()
     else:
         st.error("Não foi possível conectar à base de conhecimento. Por favor, recarregue a página.")
