@@ -1,4 +1,4 @@
-# app.py (Versão Final com Agente Conversacional, Memória, Ferramentas e Guardrails)
+# app.py (Versão Final com Agente Conversacional, Intenção, Ferramentas e Guardrails)
 import streamlit as st
 import os
 import smtplib
@@ -31,13 +31,17 @@ genai.configure(api_key=api_key)
 
 
 # --- DEFINIÇÃO DAS FERRAMENTAS PARA O AGENTE ---
+class ResponderConversa(BaseModel):
+    """Ferramenta para responder a saudações, despedidas ou conversas informais que não são perguntas técnicas."""
+    resposta_cordial: str = Field(description="Uma resposta curta, amigável e profissional. Ex: 'Boa noite! Em que posso ajudar?'.")
+
 class BuscaRecomendacao(BaseModel):
     """Ferramenta para buscar recomendações gerais de produtos para um problema agrícola."""
     problema_agricola: str = Field(description="A descrição do problema do utilizador, incluindo praga e cultura se mencionados. Ex: 'guanxuma na soja'.")
 
 class BuscaTecnica(BaseModel):
     """Ferramenta para buscar uma resposta técnica sobre um produto específico."""
-    nome_produto: str = Field(description="O nome do produto sobre o qual se pergunta. Ex: 'GLYPHOTAL TR'.")
+    nome_produto: str = Field(description="O nome do produto sobre o qual se pergunta, extraído do histórico da conversa. Ex: 'GLYPHOTAL TR'.")
     pergunta_tecnica: str = Field(description="A pergunta técnica específica. Ex: 'qual a dosagem para 1 hectare?'.")
 
 
@@ -63,13 +67,11 @@ def _run_rag_chain(query: str, db, llm, prompt_template: str):
     """ Função genérica para executar uma cadeia RAG. """
     docs = db.similarity_search(query, k=5)
     if not docs:
-        return "NAO_ENCONTRADO"
+        return "Com base nas informações disponíveis, não encontrei uma resposta específica na nossa base de dados. Poderia reformular a sua pergunta?"
     
     contexto = "\n\n---\n\n".join([doc.page_content for doc in docs])
-    
     prompt = ChatPromptTemplate.from_template(prompt_template)
     cadeia = prompt | llm | StrOutputParser()
-    
     return cadeia.invoke({"contexto": contexto, "pergunta": query})
 
 def ferramenta_buscar_recomendacao(problema_agricola: str, db, llm):
@@ -126,9 +128,10 @@ def orquestrador_conversacional(query: str, chat_history: list, db, llm):
     historico_formatado = "\n".join([f"{msg['role']}: {msg['content']}" for msg in chat_history])
     
     prompt_roteador = f"""
-Você é o orquestrador de um chatbot de agronomia. Sua tarefa é analisar a ÚLTIMA PERGUNTA DO UTILIZADOR e o HISTÓRICO DA CONVERSA para decidir qual ferramenta chamar.
+Você é o orquestrador de um chatbot de agronomia. Sua tarefa é analisar a ÚLTIMA PERGUNTA DO UTILIZADOR e o HISTÓRICO DA CONVERSA para decidir qual ferramenta chamar. Seja cordial e profissional.
 
-- Se a pergunta for geral, sobre um problema (ex: 'praga na soja', 'o que usar para guanxuma'), use a ferramenta `BuscaRecomendacao`.
+- Se a pergunta for uma saudação, despedida ou conversa informal (ex: 'Olá', 'Boa noite', 'Obrigado', 'Quem é você?'), use a ferramenta `ResponderConversa`.
+- Se a pergunta for geral, sobre um problema agrícola (ex: 'praga na soja', 'o que usar para guanxuma'), use a ferramenta `BuscaRecomendacao`.
 - Se a pergunta for claramente sobre um produto específico já mencionado no histórico (ex: 'qual a dosagem desse produto?', 'como aplicar o Glyphotal?'), use a ferramenta `BuscaTecnica`.
 
 HISTÓRICO DA CONVERSA:
@@ -137,7 +140,7 @@ HISTÓRICO DA CONVERSA:
 ÚLTIMA PERGUNTA DO UTILIZADOR: {query}
 """
     
-    llm_com_ferramentas = llm.bind_tools([BuscaRecomendacao, BuscaTecnica])
+    llm_com_ferramentas = llm.bind_tools([BuscaRecomendacao, BuscaTecnica, ResponderConversa])
     analise = llm_com_ferramentas.invoke(prompt_roteador)
 
     if not analise.tool_calls:
@@ -147,15 +150,17 @@ HISTÓRICO DA CONVERSA:
     nome_ferramenta = ferramenta_chamada['name']
     argumentos = ferramenta_chamada['args']
 
+    if nome_ferramenta == ResponderConversa.__name__:
+        return argumentos.get("resposta_cordial", "Olá! Como posso ajudar?")
+
     if nome_ferramenta == BuscaTecnica.__name__:
         return ferramenta_buscar_resposta_tecnica(
-            produto=argumentos.get("nome_produto"),
+            nome_produto=argumentos.get("nome_produto"),
             pergunta_tecnica=argumentos.get("pergunta_tecnica"),
             db=db,
             llm=llm
         )
     
-    # O padrão é buscar uma recomendação de produto
     return ferramenta_buscar_recomendacao(
         problema_agricola=argumentos.get("problema_agricola", query),
         db=db,
@@ -165,8 +170,10 @@ HISTÓRICO DA CONVERSA:
 # --- Guardrail de Segurança de Entrada ---
 def is_input_safe(query: str) -> bool:
     """ Verifica se a entrada do utilizador contém linguagem inadequada. """
-    blocklist = ["palavrão1", "insulto2", "termo_ofensivo3"] # Adicionar palavras a bloquear
-    if any(word in query.lower() for word in blocklist):
+    # Esta é uma lista de exemplo. Pode ser expandida com mais termos.
+    blocklist = ["palavrão", "insulto", "ofensa", "agressão"]
+    query_lower = query.lower()
+    if any(word in query_lower for word in blocklist):
         return False
     return True
 
@@ -191,6 +198,7 @@ db, llm = carregar_base_conhecimento()
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+        # Adicionar botões de ação às mensagens do assistente que contêm recomendações
         if message["role"] == "assistant" and "Produto 1:" in message["content"]:
             st.markdown("---")
             # ... (Lógica dos botões de ação pode ser adicionada aqui se desejado)
@@ -200,9 +208,9 @@ if prompt := st.chat_input("Descreva o seu problema ou faça uma pergunta..."):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # --- Execução com Guardrail ---
+    # --- Execução com Guardrail de Segurança ---
     if not is_input_safe(prompt):
-        response = "Peço desculpa, mas não posso processar pedidos com linguagem inadequada. Por favor, mantenha a conversa profissional."
+        response = "Peço desculpa, mas não posso processar pedidos com linguagem inadequada. Por favor, mantenha a conversa profissional e focada em questões agrícolas."
     elif db is not None and llm is not None:
         with st.chat_message("assistant"):
             with st.spinner("A pensar..."):
