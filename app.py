@@ -208,7 +208,7 @@ if prompt := st.chat_input("Descreva o seu problema ou faça uma pergunta..."):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # --- Execução com Guardrail de Segurança ---
+    # --- Execução com Guardrail ---
     if not is_input_safe(prompt):
         response = "Peço desculpa, mas não posso processar pedidos com linguagem inadequada. Por favor, mantenha a conversa profissional e focada em questões agrícolas."
     elif db is not None and llm is not None:
